@@ -665,8 +665,14 @@ class ETRIPdfGenerator:
         return flowables
 
     @staticmethod
+    def _has_korean(text: str) -> bool:
+        """한글 문자 포함 여부"""
+        return any('\uAC00' <= c <= '\uD7A3' for c in text)
+
+    @staticmethod
     def _optimal_col_widths(
-        tbl: 'DocTable', n_cols: int, cell_fs: float, available_w: float
+        tbl: 'DocTable', n_cols: int, cell_fs: float, available_w: float,
+        cell_pad: int = 4,
     ) -> list[float]:
         """
         텍스트 자연 너비 기반 컬럼 너비 최적화.
@@ -674,8 +680,8 @@ class ETRIPdfGenerator:
         """
         from reportlab.pdfbase import pdfmetrics
 
-        PADDING = 7   # 좌우 패딩 합계 (pt)
-        MIN_COL = 12  # 최소 컬럼 너비 (pt)
+        PADDING = cell_pad * 2   # 좌우 패딩 합계 (pt)
+        MIN_COL = max(cell_pad * 2 + 4, 8)  # 최소 컬럼 너비 (pt)
 
         # ── 1단계: 각 컬럼의 자연 너비(한 줄에 들어가는 너비) 수집 ──
         natural: list[float] = [0.0] * n_cols   # 최장 줄 너비
@@ -766,8 +772,12 @@ class ETRIPdfGenerator:
         )
         n_cols = max(n_cols, 1)
 
-        # ── 폰트 크기: 컬럼 수에 따라 ────────────────────────────────
-        if n_cols >= 8:
+        # ── 폰트 크기: 컬럼 수에 따라 세분화 ─────────────────────────
+        if n_cols >= 25:
+            cell_fs, cell_ld = 6.0, 8
+        elif n_cols >= 18:
+            cell_fs, cell_ld = 6.5, 8
+        elif n_cols >= 10:
             cell_fs, cell_ld = 7.0, 9
         elif n_cols >= 6:
             cell_fs, cell_ld = 7.5, 10
@@ -776,14 +786,26 @@ class ETRIPdfGenerator:
         else:
             cell_fs, cell_ld = S.FS_BODY - 0.5, S.LEADING_BODY - 2
 
+        # ── 열 수에 비례한 패딩 축소 (좁은 열에서 텍스트 줄바꿈 방지) ──
+        _avg_col_w = S.CONTENT_W / n_cols
+        if _avg_col_w < 14:
+            cell_pad = 1   # 매우 좁은 열 (28+ cols)
+        elif _avg_col_w < 20:
+            cell_pad = 2
+        elif _avg_col_w < 30:
+            cell_pad = 3
+        else:
+            cell_pad = 4
+
         # ── 컬럼 너비 자동 최적화 ────────────────────────────────────
-        col_w = self._optimal_col_widths(tbl, n_cols, cell_fs, S.CONTENT_W)
+        col_w = self._optimal_col_widths(tbl, n_cols, cell_fs, S.CONTENT_W, cell_pad)
 
         # ── 셀 높이 제한 ──────────────────────────────────────────────
         MAX_CELL_H       = S.CONTENT_H * 0.45
         max_lines_per_cell = max(3, int(MAX_CELL_H / cell_ld))
 
         # ── 기본 스타일 명령 ──────────────────────────────────────────
+        cell_pad_v = min(4, cell_pad + 1)  # 세로 패딩은 가로보다 약간 넉넉하게
         ts_cmds: list = [
             # 폰트
             ('FONTNAME',      (0, 0), (-1, -1), S.FONT_REGULAR),
@@ -792,11 +814,11 @@ class ETRIPdfGenerator:
             # 정렬 (기본: 왼쪽/가운데)
             ('ALIGN',         (0, 0), (-1, -1), 'LEFT'),
             ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
-            # 패딩
-            ('TOPPADDING',    (0, 0), (-1, -1), 4),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ('LEFTPADDING',   (0, 0), (-1, -1), 6),
-            ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+            # 패딩 (열 수에 따라 동적)
+            ('TOPPADDING',    (0, 0), (-1, -1), cell_pad_v),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), cell_pad_v),
+            ('LEFTPADDING',   (0, 0), (-1, -1), cell_pad),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), cell_pad),
             # 외곽 테두리 (약간 굵게)
             ('BOX',       (0, 0), (-1, -1), 0.75, self._T_BORDER),
             # 내부 선
@@ -823,6 +845,7 @@ class ETRIPdfGenerator:
 
         # ── 데이터 행 스타일 ─────────────────────────────────────────
         data_row_idx = 0  # 헤더 제외 카운터 (교대 색상용)
+        total_row_idxs: set[int] = set()
         for r_idx, row in enumerate(tbl.rows):
             if r_idx < n_header_rows:
                 continue
@@ -836,8 +859,13 @@ class ETRIPdfGenerator:
             is_total = first_text in self._TOTAL_KEYS
 
             if is_total:
-                row_bg = self._T_TOTAL_BG
-                ts_cmds.append(('FONTNAME', (0, r_idx), (-1, r_idx), S.FONT_BOLD))
+                row_bg = self._T_HDR_BG  # 합계 행 = 헤더와 동일 파란 배경
+                ts_cmds += [
+                    ('FONTNAME',  (0, r_idx), (-1, r_idx), S.FONT_BOLD),
+                    ('TEXTCOLOR', (0, r_idx), (-1, r_idx), self._T_HDR_FG),
+                    ('ALIGN',     (0, r_idx), (-1, r_idx), 'CENTER'),
+                ]
+                total_row_idxs.add(r_idx)
             else:
                 row_bg = self._T_EVEN_BG if data_row_idx % 2 == 1 else self._T_ODD_BG
 
@@ -903,8 +931,12 @@ class ETRIPdfGenerator:
                 else:
                     al = TA_LEFT
 
-                fn = S.FONT_BOLD if (is_hdr_row or cell.is_header) else S.FONT_REGULAR
-                fg = self._T_HDR_FG if (is_hdr_row or cell.is_header) else S.GRAY_DARK
+                is_total_row = r_idx in total_row_idxs
+                fn = S.FONT_BOLD if (is_hdr_row or cell.is_header or is_total_row) else S.FONT_REGULAR
+                fg = self._T_HDR_FG if (is_hdr_row or cell.is_header or is_total_row) else S.GRAY_DARK
+
+                # CJK 줄바꿈: 한국어 포함 셀에만 적용 (숫자/연도 셀은 영문 규칙으로)
+                wrap_mode = 'CJK' if self._has_korean(plain) else None
 
                 p_style = ParagraphStyle(
                     f'TC{r_idx}_{col_cursor}',
@@ -913,7 +945,7 @@ class ETRIPdfGenerator:
                     leading=cell_ld,
                     textColor=fg,
                     alignment=al,
-                    wordWrap='CJK',   # 한국어 포함 셀: 어디서든 줄바꿈 허용
+                    wordWrap=wrap_mode,
                 )
                 row_data[col_cursor] = Paragraph(cell_text, p_style)
 
@@ -938,8 +970,8 @@ class ETRIPdfGenerator:
                     merge_bg = self._T_MERGE_BG if col_cursor == 0 else self._T_EVEN_BG
                     ts_cmds.append(('BACKGROUND', (col_cursor, r_idx), (span_end_c, span_end_r), merge_bg))
 
-                # 셀별 배경 오버라이드 (DOCX 지정색)
-                if cell.bg_color and not (is_hdr_row or cell.is_header):
+                # 셀별 배경 오버라이드 (DOCX 지정색) — 합계 행 제외
+                if cell.bg_color and not (is_hdr_row or cell.is_header) and r_idx not in total_row_idxs:
                     try:
                         ts_cmds.append((
                             'BACKGROUND',
