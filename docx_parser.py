@@ -54,6 +54,8 @@ class TableCell:
     bg_color: str | None = None
     bold: bool = False
     is_header: bool = False
+    vmerge: str = ''   # 'restart' | 'continue' | ''
+    align: str = ''    # 'center' | 'right' | '' (셀 수준 정렬 힌트)
 
 
 @dataclass
@@ -269,24 +271,42 @@ class DocxParser:
                 wv = gc.get(f'{{{w}}}w', '1000')
                 col_widths.append(int(wv))
 
+        _HEADER_COLORS = {
+            '1565C0', '1976D2', '2E75B6', '17375E',
+            '003366', '0070C0', '4472C4', '244185',
+            '1F3864', '2F5496', '305496',
+        }
+
         for r_idx, tr_el in enumerate(tbl_el.findall(f'{{{w}}}tr')):
             cells = []
             for tc_el in tr_el.findall(f'{{{w}}}tc'):
-                # 셀 속성
                 tcpr = tc_el.find(f'{{{w}}}tcPr')
-                colspan = 1
+                colspan  = 1
                 bg_color = None
-                is_header = False
+                vmerge   = ''
+                cell_align = ''
+
                 if tcpr is not None:
+                    # colspan
                     span_el = tcpr.find(f'{{{w}}}gridSpan')
                     if span_el is not None:
-                        sv = span_el.get(f'{{{w}}}val', '1')
-                        colspan = int(sv)
+                        colspan = int(span_el.get(f'{{{w}}}val', '1'))
+
+                    # vMerge (rowspan)
+                    vm_el = tcpr.find(f'{{{w}}}vMerge')
+                    if vm_el is not None:
+                        val = vm_el.get(f'{{{w}}}val', '')
+                        vmerge = 'restart' if val == 'restart' else 'continue'
+
+                    # 배경색
                     shd = tcpr.find(f'{{{w}}}shd')
                     if shd is not None:
                         fill = shd.get(f'{{{w}}}fill', '')
                         if fill and fill.upper() not in ('AUTO', 'FFFFFF', ''):
                             bg_color = fill
+
+                    # 셀 수준 텍스트 정렬 (tcPr > vAlign)
+                    # (수평 정렬은 p 수준에서 처리)
 
                 # 셀 텍스트
                 paras = []
@@ -295,22 +315,62 @@ class DocxParser:
                     if para:
                         paras.append(para)
 
-                # 헤더 행 감지 (1행 또는 배경색이 진한 경우)
-                if r_idx == 0:
-                    is_header = True
-                elif bg_color and bg_color.upper() in (
-                    '1565C0', '1976D2', '2E75B6', '17375E',
-                    '003366', '0070C0', '4472C4', '244185',
-                ):
-                    is_header = True
+                # 헤더 행 감지
+                is_header = (
+                    r_idx == 0
+                    or (bg_color and bg_color.upper() in _HEADER_COLORS)
+                )
+
+                # 셀 정렬 힌트: 모든 단락이 center면 center
+                aligns = [p.alignment for p in paras if p.alignment]
+                if aligns and all(a == 'center' for a in aligns):
+                    cell_align = 'center'
+                elif aligns and all(a == 'right' for a in aligns):
+                    cell_align = 'right'
 
                 cells.append(TableCell(
                     paragraphs=paras,
                     colspan=colspan,
                     bg_color=bg_color,
                     is_header=is_header,
+                    vmerge=vmerge,
+                    align=cell_align,
                 ))
             rows.append(TableRow(cells=cells, is_header=r_idx == 0))
+
+        # rowspan 계산: vmerge='restart' 셀의 rowspan을 실제 값으로 설정
+        # 그리드 좌표 → 셀 매핑 구성
+        grid: list[list[TableCell | None]] = []
+        for row in rows:
+            grid_row: list[TableCell | None] = []
+            col_cursor = 0
+            cell_iter = iter(row.cells)
+            for cell in row.cells:
+                while col_cursor < len(grid_row):
+                    col_cursor += 1
+                for _ in range(cell.colspan):
+                    grid_row.append(cell)
+                col_cursor += cell.colspan
+            grid.append(grid_row)
+
+        n_grid_cols = max((len(r) for r in grid), default=0)
+        for c in range(n_grid_cols):
+            r = 0
+            while r < len(grid):
+                row_g = grid[r]
+                if c >= len(row_g):
+                    r += 1
+                    continue
+                cell = row_g[c]
+                if cell and cell.vmerge == 'restart':
+                    span = 1
+                    for r2 in range(r + 1, len(grid)):
+                        if c < len(grid[r2]) and grid[r2][c] and grid[r2][c].vmerge == 'continue':
+                            span += 1
+                        else:
+                            break
+                    cell.rowspan = span
+                r += 1
 
         return Table(rows=rows, col_widths=col_widths)
 

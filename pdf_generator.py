@@ -626,68 +626,157 @@ class ETRIPdfGenerator:
             for mw, en in zip(min_word, extra_need)
         ]
 
+    # ── 표 디자인 색상 상수 ───────────────────────────────────────────
+    _T_HDR_BG    = colors.HexColor('#1565C0')   # 헤더 배경 (진파랑)
+    _T_HDR2_BG   = colors.HexColor('#2E75B6')   # 서브헤더 배경 (중간파랑)
+    _T_HDR_FG    = colors.white
+    _T_ODD_BG    = colors.white                  # 홀수 데이터 행
+    _T_EVEN_BG   = colors.HexColor('#EBF3FB')   # 짝수 데이터 행 (연파랑)
+    _T_TOTAL_BG  = colors.HexColor('#D0E4F5')   # 합계 행
+    _T_MERGE_BG  = colors.HexColor('#C5DDF5')   # rowspan 병합 셀 (첫열)
+    _T_BORDER    = colors.HexColor('#BFBFBF')   # 테두리
+    _T_HBORDER   = colors.HexColor('#808080')   # 헤더 아래 선
+
+    # 합계/소계 행으로 인식할 키워드
+    _TOTAL_KEYS  = {'합계', '계', '소계', '전체', 'total', 'subtotal', 'sum'}
+
+    @staticmethod
+    def _is_numeric_cell(text: str) -> bool:
+        """숫자/퍼센트/날짜 위주 셀인지 판단"""
+        t = text.strip().replace(',', '').replace('%', '').replace('.', '')
+        t = t.replace('~', '').replace("'", '').replace('-', '').replace(' ', '')
+        return bool(t) and t.isdigit()
+
     def _convert_table(self, tbl: DocTable) -> list[Flowable]:
         if not tbl.rows:
             return []
 
-        # 실제 컬럼 수: colspan을 포함한 각 행의 총 그리드 컬럼 수
+        import re as _re
+
+        # ── 실제 그리드 컬럼 수 ──────────────────────────────────────
         n_cols = max(
             (sum(c.colspan for c in row.cells) for row in tbl.rows),
             default=1,
         )
         n_cols = max(n_cols, 1)
 
-        # ── 폰트 크기: 컬럼 수가 많을수록 작게 ──
-        if n_cols >= 7:
+        # ── 폰트 크기: 컬럼 수에 따라 ────────────────────────────────
+        if n_cols >= 8:
+            cell_fs, cell_ld = 7.0, 9
+        elif n_cols >= 6:
             cell_fs, cell_ld = 7.5, 10
-        elif n_cols >= 5:
+        elif n_cols >= 4:
             cell_fs, cell_ld = 8.0, 11
         else:
             cell_fs, cell_ld = S.FS_BODY - 0.5, S.LEADING_BODY - 2
 
-        # ── 컬럼 너비: 텍스트 자연 너비 기반 자동 최적화 ──
+        # ── 컬럼 너비 자동 최적화 ────────────────────────────────────
         col_w = self._optimal_col_widths(tbl, n_cols, cell_fs, S.CONTENT_W)
 
-        # 셀 최대 높이 제한 (단일 행이 페이지를 넘지 않도록)
-        MAX_CELL_H = S.CONTENT_H * 0.45
+        # ── 셀 높이 제한 ──────────────────────────────────────────────
+        MAX_CELL_H       = S.CONTENT_H * 0.45
         max_lines_per_cell = max(3, int(MAX_CELL_H / cell_ld))
 
-        ts_cmds = [
-            ('FONTNAME', (0, 0), (-1, -1), S.FONT_REGULAR),
-            ('FONTSIZE', (0, 0), (-1, -1), cell_fs),
-            ('LEADING',  (0, 0), (-1, -1), cell_ld),
-            ('VALIGN',   (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING',    (0, 0), (-1, -1), 2),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
-            ('LEFTPADDING',   (0, 0), (-1, -1), 3),
-            ('RIGHTPADDING',  (0, 0), (-1, -1), 3),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CCCCCC')),
+        # ── 기본 스타일 명령 ──────────────────────────────────────────
+        ts_cmds: list = [
+            # 폰트
+            ('FONTNAME',      (0, 0), (-1, -1), S.FONT_REGULAR),
+            ('FONTSIZE',      (0, 0), (-1, -1), cell_fs),
+            ('LEADING',       (0, 0), (-1, -1), cell_ld),
+            # 정렬 (기본: 왼쪽/가운데)
+            ('ALIGN',         (0, 0), (-1, -1), 'LEFT'),
+            ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+            # 패딩
+            ('TOPPADDING',    (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 6),
+            # 외곽 테두리 (약간 굵게)
+            ('BOX',       (0, 0), (-1, -1), 0.75, self._T_BORDER),
+            # 내부 선
+            ('INNERGRID', (0, 0), (-1, -1), 0.5,  self._T_BORDER),
         ]
 
-        data = []
+        # ── 헤더 행 스타일 (0행) ──────────────────────────────────────
+        n_header_rows = sum(1 for r in tbl.rows if r.is_header)
+        if n_header_rows == 0:
+            n_header_rows = 1
+
+        for hr in range(n_header_rows):
+            ts_cmds += [
+                ('BACKGROUND', (0, hr), (-1, hr), self._T_HDR_BG),
+                ('TEXTCOLOR',  (0, hr), (-1, hr), self._T_HDR_FG),
+                ('FONTNAME',   (0, hr), (-1, hr), S.FONT_BOLD),
+                ('ALIGN',      (0, hr), (-1, hr), 'CENTER'),
+            ]
+        # 헤더 아래 구분선
+        ts_cmds.append(
+            ('LINEBELOW', (0, n_header_rows - 1), (-1, n_header_rows - 1),
+             1.0, self._T_HBORDER)
+        )
+
+        # ── 데이터 행 스타일 ─────────────────────────────────────────
+        data_row_idx = 0  # 헤더 제외 카운터 (교대 색상용)
         for r_idx, row in enumerate(tbl.rows):
-            # colspan > 1 셀은 빈 셀로 그리드를 채워야 함
-            row_data: list = []
+            if r_idx < n_header_rows:
+                continue
+
+            # 합계 행 감지 (첫 셀 텍스트 기준)
+            first_text = ''
+            if row.cells:
+                first_text = ' '.join(
+                    p.text.strip() for p in row.cells[0].paragraphs
+                ).strip().lower()
+            is_total = first_text in self._TOTAL_KEYS
+
+            if is_total:
+                row_bg = self._T_TOTAL_BG
+                ts_cmds.append(('FONTNAME', (0, r_idx), (-1, r_idx), S.FONT_BOLD))
+            else:
+                row_bg = self._T_EVEN_BG if data_row_idx % 2 == 1 else self._T_ODD_BG
+
+            ts_cmds.append(('BACKGROUND', (0, r_idx), (-1, r_idx), row_bg))
+            data_row_idx += 1
+
+        # ── 데이터 그리드 구성 ───────────────────────────────────────
+        from reportlab.pdfbase import pdfmetrics as _pm
+        import math as _math
+
+        data: list[list] = []
+
+        for r_idx, row in enumerate(tbl.rows):
+            row_data: list = [''] * n_cols
             col_cursor = 0
+            is_hdr_row = r_idx < n_header_rows
+
             for cell in row.cells:
+                if col_cursor >= n_cols:
+                    break
+
+                # vMerge continuation → 빈 셀 (SPAN은 restart 행에서 이미 등록됨)
+                # 반드시 occupied 체크보다 먼저 처리해야 이중 전진(double-advance) 버그 방지
+                if cell.vmerge == 'continue':
+                    col_cursor += cell.colspan
+                    continue
+
+                # 셀 텍스트 구성 및 잘라내기
                 lines = [p.text.strip() for p in cell.paragraphs if p.text.strip()]
+                eff_col_w = col_w[col_cursor] if col_cursor < len(col_w) else (S.CONTENT_W / n_cols)
+                eff_col_w *= cell.colspan
+                eff_col_w = max(eff_col_w, 10.0)  # 0 나누기 방지
 
-                # 셀 너비 추정 → 줄당 최대 문자 수 계산
-                cell_col_w = col_w[col_cursor] if col_cursor < len(col_w) else avg_col_w
-                cell_col_w *= cell.colspan
-                chars_per_line = max(1, int(cell_col_w / (cell_fs * 0.58)))
-
-                # 실제 줄바꿈을 고려한 총 라인 수 추정 후 잘라내기
+                # pdfmetrics 기반 정확한 줄 수 추정 (한국어 포함)
                 wrapped_count = 0
-                trimmed_lines = []
+                trimmed_lines: list[str] = []
                 for ln in lines:
-                    wrapped = max(1, (len(ln) + chars_per_line - 1) // chars_per_line)
+                    ln_w = _pm.stringWidth(ln, S.FONT_REGULAR, cell_fs)
+                    wrapped = max(1, _math.ceil(ln_w / eff_col_w))
                     if wrapped_count + wrapped > max_lines_per_cell:
-                        # 남은 공간에 맞게 해당 줄 자르기
                         remaining = max_lines_per_cell - wrapped_count
                         if remaining > 0:
-                            max_chars = remaining * chars_per_line
-                            trimmed_lines.append(ln[:max_chars] + ('…' if len(ln) > max_chars else ''))
+                            ratio = (remaining * eff_col_w) / max(ln_w, 1.0)
+                            cutoff = max(1, int(len(ln) * ratio))
+                            trimmed_lines.append(ln[:cutoff] + ('…' if len(ln) > cutoff else ''))
                         break
                     trimmed_lines.append(ln)
                     wrapped_count += wrapped
@@ -697,65 +786,79 @@ class ETRIPdfGenerator:
                     for l in trimmed_lines
                 )
 
-                is_hdr = row.is_header or cell.is_header
-                fn = S.FONT_BOLD if is_hdr else S.FONT_REGULAR
-                tc = S.WHITE    if is_hdr else S.GRAY_DARK
+                # 정렬 결정
+                plain = ' '.join(trimmed_lines)
+                if is_hdr_row or cell.is_header:
+                    al = TA_CENTER
+                elif cell.align == 'center' or self._is_numeric_cell(plain):
+                    al = TA_CENTER
+                elif cell.align == 'right':
+                    al = TA_RIGHT
+                else:
+                    al = TA_LEFT
+
+                fn = S.FONT_BOLD if (is_hdr_row or cell.is_header) else S.FONT_REGULAR
+                fg = self._T_HDR_FG if (is_hdr_row or cell.is_header) else S.GRAY_DARK
+
                 p_style = ParagraphStyle(
                     f'TC{r_idx}_{col_cursor}',
                     fontName=fn,
                     fontSize=cell_fs,
                     leading=cell_ld,
-                    textColor=tc,
-                    alignment=TA_CENTER if is_hdr else TA_LEFT,
+                    textColor=fg,
+                    alignment=al,
                 )
-                row_data.append(Paragraph(cell_text, p_style))
+                row_data[col_cursor] = Paragraph(cell_text, p_style)
 
-                span_end = col_cursor + cell.colspan - 1
+                span_end_c = col_cursor + cell.colspan - 1
+                # rowspan을 페이지 높이 기준으로 제한 (너무 큰 rowspan은 LayoutError 유발)
+                # 실제 행 높이 ≈ cell_ld * 4 (평균 4줄) + 상하패딩 8pt 로 보수적 추정
+                _est_row_h = cell_ld * 4 + 8
+                _max_rs = max(2, int(S.CONTENT_H * 0.80 / max(_est_row_h, 1)))
+                safe_rowspan = min(cell.rowspan, _max_rs)
+                span_end_r = r_idx + safe_rowspan - 1
 
-                # colspan 스팬 명시
+                # colspan SPAN
                 if cell.colspan > 1:
-                    ts_cmds.append(('SPAN', (col_cursor, r_idx), (span_end, r_idx)))
-                # 빈 셀로 나머지 채우기 (colspan 이후)
-                for _ in range(cell.colspan - 1):
-                    row_data.append('')
+                    ts_cmds.append(('SPAN', (col_cursor, r_idx), (span_end_c, r_idx)))
+                    ts_cmds.append(('ALIGN', (col_cursor, r_idx), (span_end_c, r_idx), 'CENTER'))
 
-                # 배경색
-                bg = None
-                if is_hdr:
-                    bg = S.TABLE_HEADER
-                elif cell.bg_color:
+                # rowspan SPAN (안전한 범위 내에서만 적용)
+                if safe_rowspan > 1:
+                    ts_cmds.append(('SPAN', (col_cursor, r_idx), (span_end_c, span_end_r)))
+                    ts_cmds.append(('VALIGN', (col_cursor, r_idx), (span_end_c, span_end_r), 'MIDDLE'))
+                    # 병합 셀 배경 (첫 컬럼 병합 셀은 특별 색상)
+                    merge_bg = self._T_MERGE_BG if col_cursor == 0 else self._T_EVEN_BG
+                    ts_cmds.append(('BACKGROUND', (col_cursor, r_idx), (span_end_c, span_end_r), merge_bg))
+
+                # 셀별 배경 오버라이드 (DOCX 지정색)
+                if cell.bg_color and not (is_hdr_row or cell.is_header):
                     try:
-                        bg = colors.HexColor(f'#{cell.bg_color}')
+                        ts_cmds.append((
+                            'BACKGROUND',
+                            (col_cursor, r_idx), (span_end_c, r_idx),
+                            colors.HexColor(f'#{cell.bg_color}'),
+                        ))
                     except Exception:
                         pass
-                elif r_idx % 2 == 1:
-                    bg = S.TABLE_ODD
-
-                if bg:
-                    ts_cmds.append((
-                        'BACKGROUND',
-                        (col_cursor, r_idx), (span_end, r_idx),
-                        bg,
-                    ))
 
                 col_cursor += cell.colspan
 
-            # 행이 n_cols보다 짧으면 빈 셀 추가
-            while len(row_data) < n_cols:
-                row_data.append('')
-            data.append(row_data[:n_cols])
+            data.append(row_data)
+
+        # n_rows 확인 (rowspan으로 생긴 빈 행 채우기)
+        while len(data) < len(tbl.rows):
+            data.append([''] * n_cols)
 
         try:
             table = Table(
                 data, colWidths=col_w,
-                repeatRows=1,
-                splitByRow=1,         # 행 단위 페이지 분할 허용
-                normalizedData=0,
+                repeatRows=n_header_rows,
+                splitByRow=1,
             )
             table.setStyle(TableStyle(ts_cmds))
-            return [Spacer(1, 2 * mm), table, Spacer(1, 2 * mm)]
-        except Exception as e:
-            # 표 오류 시 텍스트로 폴백
+            return [Spacer(1, 3 * mm), table, Spacer(1, 3 * mm)]
+        except Exception:
             fallback = []
             for row in tbl.rows:
                 line = ' | '.join(
@@ -763,10 +866,8 @@ class ETRIPdfGenerator:
                     for cell in row.cells
                 )
                 if line.strip():
-                    fallback.append(Paragraph(
-                        line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;'),
-                        self.para_style,
-                    ))
+                    esc = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                    fallback.append(Paragraph(esc, self.para_style))
             return fallback
 
     def _convert_image(self, img: DocImage) -> list[Flowable]:
