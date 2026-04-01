@@ -94,15 +94,36 @@ class PartDividerPage(Flowable):
             text_y -= 9 * mm
 
 
+class PartMarker(Flowable):
+    """현재 PART 레이블을 푸터에 전달하는 제로 높이 마커"""
+    _CURRENT = ['']
+
+    def __init__(self, part_text: str):
+        super().__init__()
+        self._part  = part_text
+        self.width  = 0
+        self.height = 0
+
+    def wrap(self, aw, ah):
+        return 0, 0
+
+    def draw(self):
+        PartMarker._CURRENT[0] = self._part
+
+
 class ChapterHeader(Flowable):
-    """H1 챕터 헤더 바 (파란 배경에 챕터 번호 + 제목)"""
+    """H1 챕터 헤더: 번호(위) + 제목(아래) + 파란 구분선, 배경 없음"""
+
+    _NUM_FS  = 20   # 번호 폰트 크기 (pt)
+    _TIT_FS  = 16   # 제목 폰트 크기 (pt)
 
     def __init__(self, number: str, title: str, available_w: float):
         super().__init__()
         self._number = number
         self._title  = title
         self.width   = available_w
-        self.height  = 14 * mm
+        # 번호줄 + 제목줄 + 구분선 + 여백
+        self.height  = self._NUM_FS * 1.4 + self._TIT_FS * 1.6 + 4 * mm
 
     def wrap(self, aw, ah):
         return self.width, self.height
@@ -111,19 +132,26 @@ class ChapterHeader(Flowable):
         c = self.canv
         w, h = self.width, self.height
 
-        # 파란 배경 바
-        c.setFillColor(S.BLUE_LIGHT)
-        c.rect(0, 0, w, h, fill=1, stroke=0)
+        # 구분선 (하단)
+        c.setStrokeColor(S.BLUE_PRIMARY)
+        c.setLineWidth(1.2)
+        c.line(0, 1.5 * mm, w, 1.5 * mm)
 
-        # 챕터 번호 (왼쪽, 굵게)
-        c.setFillColor(S.WHITE)
-        c.setFont(S.FONT_BOLD, S.FS_H1)
-        c.drawString(5 * mm, h / 2 - S.FS_H1 * 0.35, self._number)
+        # 제목 (구분선 바로 위)
+        title_y = 1.5 * mm + 3 * mm
+        c.setFont(S.FONT_BOLD, self._TIT_FS)
+        c.setFillColor(S.BLUE_PRIMARY)
+        c.drawString(0, title_y, self._title)
 
-        # 제목
-        c.setFont(S.FONT_BOLD, S.FS_H1)
-        num_w = c.stringWidth(self._number + '  ', S.FONT_BOLD, S.FS_H1)
-        c.drawString(5 * mm + num_w, h / 2 - S.FS_H1 * 0.35, self._title)
+        # 번호 (제목 위)
+        try:
+            num_str = f'{int(self._number):02d}'
+        except (ValueError, TypeError):
+            num_str = self._number
+        num_y = title_y + self._TIT_FS * 1.6
+        c.setFont(S.FONT_BOLD, self._NUM_FS)
+        c.setFillColor(S.BLUE_PRIMARY)
+        c.drawString(0, num_y, num_str)
 
 
 class _TocEntry(Flowable):
@@ -247,6 +275,8 @@ class ETRIPdfGenerator:
 
     # 콘텐츠 페이지 카운터 (표지/목차/PART 구분 페이지 제외한 실제 페이지 번호)
     _CONTENT_PAGE: list[int] = [0]
+    # PART 구분 페이지 직후 첫 H1의 PageBreak 생략 플래그
+    _SKIP_H1_BREAK: list[bool] = [False]
 
     def __init__(self, output_path: str, doc_meta: dict | None = None):
         self.output_path = output_path
@@ -376,14 +406,18 @@ class ETRIPdfGenerator:
         )
 
         # ─ 푸터 ─
-        footer_y = S.MARGIN_BOTTOM - 6 * mm
+        footer_y = S.MARGIN_BOTTOM - 7 * mm
         canv.setStrokeColor(S.GRAY_LIGHT)
         canv.line(
-            S.MARGIN_LEFT, footer_y + 4 * mm,
-            S.PAGE_W - S.MARGIN_RIGHT, footer_y + 4 * mm,
+            S.MARGIN_LEFT, footer_y + 9 * mm,
+            S.PAGE_W - S.MARGIN_RIGHT, footer_y + 9 * mm,
         )
-        canv.setFont(S.FONT_REGULAR, 8)
+        canv.setFont(S.FONT_REGULAR, 7)
         canv.setFillColor(S.GRAY_MID)
+        part_label = PartMarker._CURRENT[0]
+        if part_label:
+            canv.drawCentredString(S.PAGE_W / 2, footer_y + 4 * mm, part_label.upper())
+        canv.setFont(S.FONT_REGULAR, 8)
         canv.drawCentredString(S.PAGE_W / 2, footer_y, str(display_num))
 
         canv.restoreState()
@@ -417,62 +451,53 @@ class ETRIPdfGenerator:
                 c.setFillColor(S.WHITE)
                 c.rect(0, 0, w, h, fill=1, stroke=0)
 
-                # 상단 파란 장식 바
-                c.setFillColor(S.BLUE_PRIMARY)
-                c.rect(0, h - 18 * mm, w, 18 * mm, fill=1, stroke=0)
-
-                # ETRI 로고 텍스트
-                c.setFillColor(S.WHITE)
-                c.setFont(S.FONT_BOLD, 22)
-                c.drawString(S.MARGIN_LEFT, h - 13 * mm, 'ETRI')
-
-                # 연도
-                year = self_.meta.get('year', '2025')
-                c.setFont(S.FONT_REGULAR, 10)
-                c.setFillColor(S.WHITE)
-                c.drawRightString(w - S.MARGIN_RIGHT, h - 12 * mm, year)
-
-                # 제목 영역 (중앙)
-                title     = self_.meta.get('title', '표준체계 및 선도전략')
-                subtitle  = self_.meta.get('subtitle', '')
-                year_big  = self_.meta.get('year', '2025')
-
-                # 큰 제목
-                center_y = h * 0.58
-                c.setFont(S.FONT_BOLD, 28)
-                c.setFillColor(S.BLUE_PRIMARY)
-                c.drawCentredString(w / 2, center_y, title)
-
-                if subtitle:
-                    c.setFont(S.FONT_BOLD, 28)
-                    c.setFillColor(S.ORANGE)
-                    c.drawCentredString(w / 2, center_y - 16 * mm, subtitle)
-
-                # 연도 (크게)
-                c.setFont(S.FONT_BOLD, 32)
-                c.setFillColor(S.GRAY_DARK)
-                c.drawCentredString(w / 2, center_y - 35 * mm, year_big)
-
-                # 하단 구분선
-                c.setStrokeColor(S.GRAY_LIGHT)
-                c.setLineWidth(0.5)
-                c.line(S.MARGIN_LEFT, 35 * mm, w - S.MARGIN_RIGHT, 35 * mm)
-
-                # 날짜
+                title    = self_.meta.get('title', '표준체계 및 선도전략 2025')
+                year_big = self_.meta.get('year', '2025')
                 date_str = self_.meta.get('date', '')
+                org      = self_.meta.get('org', 'ICT전략연구소 표준연구본부')
+
+                # ── 상단 "ETRI" 레이블 (회색) ──
+                etri_y = h * 0.70
+                c.setFont(S.FONT_BOLD, 18)
+                c.setFillColor(S.GRAY_MID)
+                c.drawCentredString(w / 2, etri_y, 'ETRI')
+
+                # ── 메인 타이틀 (파란 굵은 텍스트) ──
+                # 제목을 두 줄로 나눔: 앞 부분(파랑) + 뒷 부분(오렌지) if '선도전략' 포함
+                title_fs = 30
+                line_gap = title_fs * 1.5
+                title_y  = etri_y - 12 * mm
+
+                # "선도전략" 이전까지 / "선도전략" 부분 분리
+                if '선도전략' in title:
+                    idx_s = title.index('선도전략')
+                    line1 = title[:idx_s].strip()
+                    line2 = title[idx_s:].strip()
+                    c.setFont(S.FONT_BOLD, title_fs)
+                    c.setFillColor(S.BLUE_PRIMARY)
+                    c.drawCentredString(w / 2, title_y, line1)
+                    c.setFillColor(S.ORANGE)
+                    c.drawCentredString(w / 2, title_y - line_gap, line2)
+                    year_y = title_y - line_gap * 2.2
+                else:
+                    c.setFont(S.FONT_BOLD, title_fs)
+                    c.setFillColor(S.BLUE_PRIMARY)
+                    c.drawCentredString(w / 2, title_y, title)
+                    year_y = title_y - line_gap * 1.4
+
+                # ── 연도 ──
+                c.setFont(S.FONT_BOLD, 28)
+                c.setFillColor(S.GRAY_DARK)
+                c.drawCentredString(w / 2, year_y, year_big)
+
+                # ── 하단 날짜 + 기관 ──
                 c.setFont(S.FONT_REGULAR, 9)
                 c.setFillColor(S.GRAY_MID)
-                c.drawCentredString(w / 2, 28 * mm, date_str)
+                c.drawCentredString(w / 2, 38 * mm, date_str)
 
-                # 기관
-                org = self_.meta.get('org', 'ICT전략연구소 표준연구본부')
                 c.setFont(S.FONT_BOLD, 9)
                 c.setFillColor(S.GRAY_DARK)
-                c.drawCentredString(w / 2, 18 * mm, org)
-
-                # 하단 파란 띠
-                c.setFillColor(S.BLUE_PRIMARY)
-                c.rect(0, 0, w, 10 * mm, fill=1, stroke=0)
+                c.drawCentredString(w / 2, 28 * mm, org)
 
         flowables.append(CoverPage(self.meta))
         flowables.append(PageBreak())
@@ -492,7 +517,7 @@ class ETRIPdfGenerator:
             spaceBefore=0,
             spaceAfter=6,
         )
-        flowables.append(Paragraph('목  차', title_style))
+        flowables.append(Paragraph('목차', title_style))
         flowables.append(HRFlowable(
             width=S.CONTENT_W,
             thickness=1.5,
@@ -585,9 +610,14 @@ class ETRIPdfGenerator:
                 num, title = '', text
                 chapter_label = text
 
+            # ChapterMarker → PageBreak → ChapterHeader 순서:
+            # 마커가 현재 페이지 빌드 중에 먼저 실행되어 _CURRENT를 갱신한 뒤
+            # PageBreak로 새 페이지가 시작될 때 _on_page가 올바른 챕터명을 사용함
             flowables.append(ChapterMarker(chapter_label))
-            # Spacer 없이 바로 ChapterHeader: 페이지 상단에 올 때 불필요한 공백 방지
-            # (spaceBefore 역할은 ChapterHeader 자체 내부 여백으로 처리)
+            # PART 구분 페이지 직후에는 이미 새 페이지이므로 PageBreak 생략
+            if not ETRIPdfGenerator._SKIP_H1_BREAK[0]:
+                flowables.append(PageBreak())
+            ETRIPdfGenerator._SKIP_H1_BREAK[0] = False
             flowables.append(ChapterHeader(
                 number=num, title=title,
                 available_w=S.CONTENT_W,
@@ -1080,7 +1110,9 @@ class ETRIPdfGenerator:
 
         # 클래스 변수 초기화 (연속 빌드 시 누적 방지)
         ChapterMarker._CURRENT[0] = ''
+        PartMarker._CURRENT[0]    = ''
         ETRIPdfGenerator._CONTENT_PAGE[0] = 0
+        ETRIPdfGenerator._SKIP_H1_BREAK[0] = False
 
         # ── Flowables 구성 ─────────────────────────────────────────
         from reportlab.platypus.doctemplate import NextPageTemplate
@@ -1125,12 +1157,27 @@ class ETRIPdfGenerator:
         for part_info, items_in_part in part_groups:
             if part_info:
                 part_text, chapter_lines = part_info
+
+                # PART 구분 전, 이 PART의 첫 H1 챕터명을 현재 페이지에서 미리 설정
+                # → PageBreak 후 첫 콘텐츠 페이지의 _on_page에서 올바른 헤더명 사용
+                for _fi in items_in_part:
+                    if isinstance(_fi, DocPara) and _fi.style == 'Heading1':
+                        _m = re.match(r'^(\d+)\s*(.*)', _fi.text.strip())
+                        _ch_label = (f'{_m.group(1)}. {_m.group(2).strip()}' if _m
+                                     else _fi.text.strip())
+                        story.append(ChapterMarker(_ch_label))
+                        break
+
                 # NextPageTemplate → PageBreak → 내용 순서가 맞아야 함
                 story.append(NextPageTemplate('cover'))
                 story.append(PageBreak())
                 story.append(PartDividerPage(part_text, chapter_lines))
                 story.append(NextPageTemplate('normal'))
                 story.append(PageBreak())
+                # PART 레이블 푸터용 마커
+                story.append(PartMarker(part_text))
+                # PART 직후 첫 H1은 이미 새 페이지이므로 추가 PageBreak 불필요
+                ETRIPdfGenerator._SKIP_H1_BREAK[0] = True
 
             idx = 0
             while idx < len(items_in_part):
