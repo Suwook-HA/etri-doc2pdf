@@ -603,6 +603,8 @@ class ETRIPdfGenerator:
             col_cursor = 0
             for cell in row.cells:
                 lines = [p.text.strip() for p in cell.paragraphs if p.text.strip()]
+                # 셀당 최대 20줄로 제한 (단일 셀이 페이지를 초과하는 것 방지)
+                lines = lines[:20]
                 cell_text = '<br/>'.join(
                     l.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
                     for l in lines
@@ -657,7 +659,12 @@ class ETRIPdfGenerator:
             data.append(row_data[:n_cols])
 
         try:
-            table = Table(data, colWidths=col_w, repeatRows=1)
+            table = Table(
+                data, colWidths=col_w,
+                repeatRows=1,
+                splitByRow=1,         # 행 단위 페이지 분할 허용
+                normalizedData=0,
+            )
             table.setStyle(TableStyle(ts_cmds))
             return [Spacer(1, 2 * mm), table, Spacer(1, 2 * mm)]
         except Exception as e:
@@ -715,13 +722,16 @@ class ETRIPdfGenerator:
             bottomMargin=S.MARGIN_BOTTOM,
             title=self.meta.get('title', ''),
             author=self.meta.get('org', ''),
+            allowSplitting=1,   # 페이지를 넘는 플로어블 분할 허용
         )
 
-        # 프레임 정의
+        # 프레임 정의 (패딩 0 → 표/이미지 너비가 CONTENT_W와 정확히 일치)
         content_frame = Frame(
             S.MARGIN_LEFT, S.MARGIN_BOTTOM,
             S.CONTENT_W, S.CONTENT_H,
             id='content',
+            leftPadding=0, rightPadding=0,
+            topPadding=0, bottomPadding=0,
         )
         cover_frame = Frame(
             0, 0, S.PAGE_W, S.PAGE_H,
