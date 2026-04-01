@@ -558,11 +558,77 @@ class ETRIPdfGenerator:
         flowables.append(Paragraph(markup, style_obj))
         return flowables
 
+    @staticmethod
+    def _optimal_col_widths(
+        tbl: 'DocTable', n_cols: int, cell_fs: float, available_w: float
+    ) -> list[float]:
+        """
+        텍스트 자연 너비 기반 컬럼 너비 최적화.
+        줄바꿈을 최소화하면서 전체 너비 = available_w 를 채우도록 분배.
+        """
+        from reportlab.pdfbase import pdfmetrics
+
+        PADDING = 7   # 좌우 패딩 합계 (pt)
+        MIN_COL = 12  # 최소 컬럼 너비 (pt)
+
+        # ── 1단계: 각 컬럼의 자연 너비(한 줄에 들어가는 너비) 수집 ──
+        natural: list[float] = [0.0] * n_cols   # 최장 줄 너비
+        min_word: list[float] = [0.0] * n_cols  # 최장 단어 너비 (절대 최소)
+
+        for row in tbl.rows:
+            col_cursor = 0
+            for cell in row.cells:
+                if col_cursor >= n_cols:
+                    break
+                span = min(cell.colspan, n_cols - col_cursor)
+                for para in cell.paragraphs:
+                    text = para.text.strip()
+                    if not text:
+                        continue
+                    for line in text.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        lw = pdfmetrics.stringWidth(line, S.FONT_REGULAR, cell_fs) + PADDING
+                        # colspan을 고려: 넓은 셀은 마지막 컬럼에 주로 기여
+                        target_col = min(col_cursor + span - 1, n_cols - 1)
+                        natural[target_col] = max(natural[target_col], lw / span)
+                        for word in line.split():
+                            ww = pdfmetrics.stringWidth(word, S.FONT_REGULAR, cell_fs) + PADDING
+                            min_word[col_cursor] = max(min_word[col_cursor], ww)
+                col_cursor += span
+
+        # ── 2단계: 최소값 보정 ──
+        natural  = [max(n, mw, MIN_COL) for n, mw in zip(natural, min_word)]
+        min_word = [max(mw, MIN_COL) for mw in min_word]
+
+        total_natural = sum(natural)
+
+        # ── 3단계: 자연 너비 합이 available_w 이하 → 그대로 사용 ──
+        if total_natural <= available_w:
+            # 남은 공간을 자연 너비 비율로 균등 확장
+            scale = available_w / total_natural
+            return [w * scale for w in natural]
+
+        # ── 4단계: 초과 시 → 최소 너비 확보 후 남은 공간 비율 배분 ──
+        total_min = sum(min_word)
+        if total_min >= available_w:
+            # 최소 너비만으로도 넘침 → 균등 분할
+            return [available_w / n_cols] * n_cols
+
+        remaining = available_w - total_min
+        # 각 컬럼이 자연 너비에서 최소 너비를 뺀 만큼 추가 공간 필요
+        extra_need = [max(0.0, n - m) for n, m in zip(natural, min_word)]
+        total_extra = sum(extra_need) or 1.0
+
+        return [
+            mw + remaining * (en / total_extra)
+            for mw, en in zip(min_word, extra_need)
+        ]
+
     def _convert_table(self, tbl: DocTable) -> list[Flowable]:
         if not tbl.rows:
             return []
-
-        MIN_COL = 10 * mm  # 최소 컬럼 너비
 
         # 실제 컬럼 수: colspan을 포함한 각 행의 총 그리드 컬럼 수
         n_cols = max(
@@ -571,37 +637,19 @@ class ETRIPdfGenerator:
         )
         n_cols = max(n_cols, 1)
 
-        # 컬럼 너비 계산 (EMU 단위 → pt 비율 변환)
-        if tbl.col_widths and len(tbl.col_widths) >= n_cols:
-            total = sum(tbl.col_widths[:n_cols]) or 1
-            col_w = [max(S.CONTENT_W * (w / total), MIN_COL) for w in tbl.col_widths[:n_cols]]
+        # ── 폰트 크기: 컬럼 수가 많을수록 작게 ──
+        if n_cols >= 7:
+            cell_fs, cell_ld = 7.5, 10
+        elif n_cols >= 5:
+            cell_fs, cell_ld = 8.0, 11
         else:
-            col_w = [S.CONTENT_W / n_cols] * n_cols
+            cell_fs, cell_ld = S.FS_BODY - 0.5, S.LEADING_BODY - 2
 
-        # 합계가 CONTENT_W를 넘지 않도록 스케일 조정
-        total_w = sum(col_w)
-        if total_w > S.CONTENT_W:
-            scale = S.CONTENT_W / total_w
-            col_w = [w * scale for w in col_w]
+        # ── 컬럼 너비: 텍스트 자연 너비 기반 자동 최적화 ──
+        col_w = self._optimal_col_widths(tbl, n_cols, cell_fs, S.CONTENT_W)
 
-        # 컬럼 너비에 따라 폰트 크기 자동 조정
-        avg_col_w = S.CONTENT_W / n_cols
-        if avg_col_w < 20 * mm:        # 20mm 미만 → 매우 좁음
-            cell_fs  = 6.5
-            cell_ld  = 9
-        elif avg_col_w < 30 * mm:      # 30mm 미만 → 좁음
-            cell_fs  = 7.5
-            cell_ld  = 10
-        elif avg_col_w < 40 * mm:      # 40mm 미만
-            cell_fs  = 8.0
-            cell_ld  = 11
-        else:
-            cell_fs  = S.FS_BODY - 0.5
-            cell_ld  = S.LEADING_BODY - 2
-
-        # 셀 최대 높이: 페이지 콘텐츠 높이의 절반
+        # 셀 최대 높이 제한 (단일 행이 페이지를 넘지 않도록)
         MAX_CELL_H = S.CONTENT_H * 0.45
-        # 셀 하나의 최대 라인 수 추정
         max_lines_per_cell = max(3, int(MAX_CELL_H / cell_ld))
 
         ts_cmds = [
