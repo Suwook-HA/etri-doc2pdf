@@ -126,6 +126,89 @@ class ChapterHeader(Flowable):
         c.drawString(5 * mm + num_w, h / 2 - S.FS_H1 * 0.35, self._title)
 
 
+class _TocEntry(Flowable):
+    """목차 항목: 번호 + 제목 ......... 페이지번호 (dot leader)"""
+
+    def __init__(self, num: str, title: str, page: str,
+                 font_reg: str, font_bold: str, font_size: float,
+                 leading: float, indent_pt: float, content_w: float,
+                 text_color, bold_num: bool = False,
+                 space_before: float = 0):
+        super().__init__()
+        self._num        = num
+        self._title      = title
+        self._page       = page
+        self._freg       = font_reg
+        self._fbold      = font_bold
+        self._fs         = font_size
+        self._leading    = leading
+        self._indent     = indent_pt
+        self._cw         = content_w
+        self._color      = text_color
+        self._bold_num   = bold_num
+        self._sb         = space_before
+        self.width       = content_w
+        self.height      = leading + space_before
+
+    def wrap(self, aw, ah):
+        return self._cw, self.height
+
+    def draw(self):
+        from reportlab.pdfbase import pdfmetrics as _pm
+        c = self.canv
+        fs  = self._fs
+        y   = 1          # 베이스라인 오프셋
+
+        c.saveState()
+
+        # ── 페이지 번호 (오른쪽 고정) ──
+        page_w = _pm.stringWidth(self._page, self._freg, fs) if self._page else 0
+        page_x = self._cw
+
+        # ── 번호 (굵게) ──
+        x = self._indent + self._sb  # spaceBefore를 x 오프셋으로 재활용 (들여쓰기)
+        x = self._indent
+        if self._num:
+            num_str = self._num + '  '
+            fn = self._fbold if self._bold_num else self._freg
+            c.setFont(fn, fs)
+            c.setFillColor(self._color)
+            c.drawString(x, y, num_str)
+            x += _pm.stringWidth(num_str, fn, fs)
+
+        # ── 제목 (제목이 너무 길면 말줄임) ──
+        c.setFont(self._freg, fs)
+        c.setFillColor(self._color)
+        dot_w    = _pm.stringWidth('.', self._freg, fs)
+        min_dots = 4           # 최소 점선 개수
+        max_title_w = page_x - page_w - x - dot_w * min_dots - 6
+
+        title = self._title
+        if _pm.stringWidth(title, self._freg, fs) > max_title_w:
+            while title and _pm.stringWidth(title + '…', self._freg, fs) > max_title_w:
+                title = title[:-1]
+            title += '…'
+        c.drawString(x, y, title)
+        title_end_x = x + _pm.stringWidth(title, self._freg, fs)
+
+        # ── 점선 (회색) ──
+        if self._page:
+            c.setFillColor(S.GRAY_MID)
+            dot_start = title_end_x + 3
+            dot_end   = page_x - page_w - 3
+            dx = dot_start
+            while dx + dot_w <= dot_end:
+                c.drawString(dx, y, '.')
+                dx += dot_w
+
+            # ── 페이지 번호 ──
+            c.setFillColor(self._color)
+            c.setFont(self._freg, fs)
+            c.drawRightString(page_x, y, self._page)
+
+        c.restoreState()
+
+
 class CalloutBox(Flowable):
     """콜아웃 박스 (왼쪽 파란 선 + 연파랑 배경)"""
 
@@ -162,6 +245,9 @@ class CalloutBox(Flowable):
 
 class ETRIPdfGenerator:
 
+    # 콘텐츠 페이지 카운터 (표지/목차/PART 구분 페이지 제외한 실제 페이지 번호)
+    _CONTENT_PAGE: list[int] = [0]
+
     def __init__(self, output_path: str, doc_meta: dict | None = None):
         self.output_path = output_path
         self.meta = doc_meta or {}
@@ -177,6 +263,9 @@ class ETRIPdfGenerator:
             alignment=TA_JUSTIFY,
             textColor=S.GRAY_DARK,
             spaceAfter=3,
+            allowWidows=0,    # 고아/과부 방지: 단락 마지막 줄이 홀로 다음 페이지로 넘어가지 않음
+            allowOrphans=0,   # 단락 첫 줄이 홀로 이전 페이지 끝에 남지 않음
+            wordWrap='CJK',   # 한국어: 어디서든 줄바꿈 허용
         )
         self.h2_style = ParagraphStyle(
             'H2',
@@ -186,6 +275,7 @@ class ETRIPdfGenerator:
             textColor=S.BLUE_PRIMARY,
             spaceBefore=8,
             spaceAfter=4,
+            keepWithNext=1,   # 제목 아래에 반드시 본문이 따라오도록 (페이지 끝 단독 방지)
         )
         self.h3_style = ParagraphStyle(
             'H3',
@@ -195,6 +285,7 @@ class ETRIPdfGenerator:
             textColor=S.BLUE_PRIMARY,
             spaceBefore=6,
             spaceAfter=3,
+            keepWithNext=1,
         )
         self.h4_style = ParagraphStyle(
             'H4',
@@ -204,6 +295,7 @@ class ETRIPdfGenerator:
             textColor=S.GRAY_DARK,
             spaceBefore=4,
             spaceAfter=2,
+            keepWithNext=1,
         )
         self.caption_style = ParagraphStyle(
             'Caption',
@@ -224,6 +316,7 @@ class ETRIPdfGenerator:
             leftIndent=6 * mm,
             bulletIndent=2 * mm,
             spaceAfter=2,
+            wordWrap='CJK',
         )
         self.toc1_style = ParagraphStyle(
             'TOC1',
@@ -259,6 +352,11 @@ class ETRIPdfGenerator:
         if page_num <= 2:
             return
 
+        # PART 구분 페이지(cover 템플릿)는 이 콜백이 호출되지 않으므로
+        # 카운터는 실제 콘텐츠 페이지만 정확히 집계함
+        ETRIPdfGenerator._CONTENT_PAGE[0] += 1
+        display_num = ETRIPdfGenerator._CONTENT_PAGE[0]
+
         canv.saveState()
 
         # ─ 헤더 ─
@@ -286,7 +384,7 @@ class ETRIPdfGenerator:
         )
         canv.setFont(S.FONT_REGULAR, 8)
         canv.setFillColor(S.GRAY_MID)
-        canv.drawCentredString(S.PAGE_W / 2, footer_y, str(page_num - 2))
+        canv.drawCentredString(S.PAGE_W / 2, footer_y, str(display_num))
 
         canv.restoreState()
 
@@ -408,8 +506,7 @@ class ETRIPdfGenerator:
         if not text:
             return None
 
-        # DOCX TOC 항목 형식: "1.2.3제목텍스트123" (끝에 페이지 번호 붙음)
-        # 끝의 숫자를 페이지 번호로 분리
+        # 끝 숫자 = 페이지 번호
         m_page = re.match(r'^(.*?)(\d+)$', text)
         if m_page:
             body_part = m_page.group(1).strip()
@@ -418,7 +515,7 @@ class ETRIPdfGenerator:
             body_part = text
             page_num  = ''
 
-        # 번호와 제목 분리 (예: "1.2.3제목" → "1.2.3  제목")
+        # 번호와 제목 분리
         m_num = re.match(r'^((?:PART\s+\w+|[IVX]+|\d+(?:\.\d+)*))\s*(.*)', body_part)
         if m_num:
             num   = m_num.group(1).strip()
@@ -427,21 +524,26 @@ class ETRIPdfGenerator:
             num   = ''
             title = body_part
 
-        # 표시 텍스트 구성
-        num_part   = f'{num}  ' if num else ''
-        page_part  = f'  {page_num}' if page_num else ''
-        # XML 이스케이프
-        def esc(s): return s.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;')
-        display = f'{esc(num_part)}{esc(title)}{esc(page_part)}'
-
-        style_map = {
-            'TOC1': self.toc1_style,
-            'TOC2': self.toc2_style,
-            'TOC3': self.toc3_style,
-            'TOC4': self.toc3_style,
+        # 레벨별 파라미터
+        cfg = {
+            'TOC1': (S.FS_TOC1, 16, 0 * mm,  True,  4),
+            'TOC2': (S.FS_TOC2, 15, 5 * mm,  False, 2),
+            'TOC3': (S.FS_TOC3, 13, 10 * mm, False, 1),
+            'TOC4': (S.FS_TOC3, 13, 14 * mm, False, 1),
         }
-        style = style_map.get(para.style, self.toc2_style)
-        return Paragraph(display, style)
+        fs, ld, indent, bold_num, sb = cfg.get(para.style, (S.FS_TOC2, 15, 5 * mm, False, 2))
+        color = S.GRAY_DARK if para.style in ('TOC1', 'TOC2') else S.GRAY_MID
+
+        return _TocEntry(
+            num=num, title=title, page=page_num,
+            font_reg=S.FONT_REGULAR, font_bold=S.FONT_BOLD,
+            font_size=fs, leading=ld,
+            indent_pt=indent,
+            content_w=S.CONTENT_W,
+            text_color=color,
+            bold_num=bold_num,
+            space_before=sb,
+        )
 
     # ── 본문 flowable 변환 ─────────────────────────────────────────
 
@@ -484,7 +586,8 @@ class ETRIPdfGenerator:
                 chapter_label = text
 
             flowables.append(ChapterMarker(chapter_label))
-            flowables.append(Spacer(1, 6 * mm))
+            # Spacer 없이 바로 ChapterHeader: 페이지 상단에 올 때 불필요한 공백 방지
+            # (spaceBefore 역할은 ChapterHeader 자체 내부 여백으로 처리)
             flowables.append(ChapterHeader(
                 number=num, title=title,
                 available_w=S.CONTENT_W,
@@ -534,10 +637,13 @@ class ETRIPdfGenerator:
 
         # ── 불릿/번호 ─
         if para.num_id is not None or style == 'Bullet':
-            bullet = '•'
-            indent = (para.num_level + 1) * 5 * mm
+            # 계층별 기호: 1단계 •, 2단계 –, 3단계 이상 ·
+            _BULLET_CHARS = ['•', '–', '·']
+            level  = para.num_level
+            bullet = _BULLET_CHARS[min(level, len(_BULLET_CHARS) - 1)]
+            indent = (level + 1) * 5 * mm
             style_obj = ParagraphStyle(
-                f'Bullet{para.num_level}',
+                f'Bullet{level}',
                 parent=self.bullet_style,
                 leftIndent=indent,
                 bulletIndent=indent - 4 * mm,
@@ -807,6 +913,7 @@ class ETRIPdfGenerator:
                     leading=cell_ld,
                     textColor=fg,
                     alignment=al,
+                    wordWrap='CJK',   # 한국어 포함 셀: 어디서든 줄바꿈 허용
                 )
                 row_data[col_cursor] = Paragraph(cell_text, p_style)
 
@@ -939,8 +1046,9 @@ class ETRIPdfGenerator:
         )
         doc_template.addPageTemplates([cover_tmpl, normal_tmpl])
 
-        # ChapterMarker._CURRENT 초기화
+        # 클래스 변수 초기화 (연속 빌드 시 누적 방지)
         ChapterMarker._CURRENT[0] = ''
+        ETRIPdfGenerator._CONTENT_PAGE[0] = 0
 
         # ── Flowables 구성 ─────────────────────────────────────────
         from reportlab.platypus.doctemplate import NextPageTemplate
@@ -992,14 +1100,29 @@ class ETRIPdfGenerator:
                 story.append(NextPageTemplate('normal'))
                 story.append(PageBreak())
 
-            for item in items_in_part:
+            idx = 0
+            while idx < len(items_in_part):
+                item = items_in_part[idx]
                 if isinstance(item, DocPara):
-                    fls = self._convert_paragraph(item)
-                    story += fls
+                    story += self._convert_paragraph(item)
                 elif isinstance(item, DocTable):
-                    story += self._convert_table(item)
+                    fls = self._convert_table(item)
+                    # 다음 항목이 캡션이면 표와 캡션을 함께 묶어 페이지 분리 방지
+                    nxt = items_in_part[idx + 1] if idx + 1 < len(items_in_part) else None
+                    if (len(fls) >= 3
+                            and isinstance(nxt, DocPara)
+                            and nxt.style == 'Caption'):
+                        cap_fls = self._convert_paragraph(nxt)
+                        if cap_fls:
+                            story.append(fls[0])                          # 앞 Spacer
+                            story.append(KeepTogether(fls[1:-1] + cap_fls))  # 표+캡션
+                            story.append(fls[-1])                         # 뒤 Spacer
+                            idx += 2
+                            continue
+                    story += fls
                 elif isinstance(item, DocImage):
                     story += self._convert_image(item)
+                idx += 1
 
         doc_template.build(story)
         print(f'PDF 생성 완료: {self.output_path}')
