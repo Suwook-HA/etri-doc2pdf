@@ -584,15 +584,35 @@ class ETRIPdfGenerator:
             scale = S.CONTENT_W / total_w
             col_w = [w * scale for w in col_w]
 
+        # 컬럼 너비에 따라 폰트 크기 자동 조정
+        avg_col_w = S.CONTENT_W / n_cols
+        if avg_col_w < 20 * mm:        # 20mm 미만 → 매우 좁음
+            cell_fs  = 6.5
+            cell_ld  = 9
+        elif avg_col_w < 30 * mm:      # 30mm 미만 → 좁음
+            cell_fs  = 7.5
+            cell_ld  = 10
+        elif avg_col_w < 40 * mm:      # 40mm 미만
+            cell_fs  = 8.0
+            cell_ld  = 11
+        else:
+            cell_fs  = S.FS_BODY - 0.5
+            cell_ld  = S.LEADING_BODY - 2
+
+        # 셀 최대 높이: 페이지 콘텐츠 높이의 절반
+        MAX_CELL_H = S.CONTENT_H * 0.45
+        # 셀 하나의 최대 라인 수 추정
+        max_lines_per_cell = max(3, int(MAX_CELL_H / cell_ld))
+
         ts_cmds = [
             ('FONTNAME', (0, 0), (-1, -1), S.FONT_REGULAR),
-            ('FONTSIZE', (0, 0), (-1, -1), S.FS_BODY - 0.5),
-            ('LEADING',  (0, 0), (-1, -1), S.LEADING_BODY - 2),
+            ('FONTSIZE', (0, 0), (-1, -1), cell_fs),
+            ('LEADING',  (0, 0), (-1, -1), cell_ld),
             ('VALIGN',   (0, 0), (-1, -1), 'MIDDLE'),
-            ('TOPPADDING',    (0, 0), (-1, -1), 3),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-            ('LEFTPADDING',   (0, 0), (-1, -1), 4),
-            ('RIGHTPADDING',  (0, 0), (-1, -1), 4),
+            ('TOPPADDING',    (0, 0), (-1, -1), 2),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+            ('LEFTPADDING',   (0, 0), (-1, -1), 3),
+            ('RIGHTPADDING',  (0, 0), (-1, -1), 3),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#CCCCCC')),
         ]
 
@@ -603,11 +623,30 @@ class ETRIPdfGenerator:
             col_cursor = 0
             for cell in row.cells:
                 lines = [p.text.strip() for p in cell.paragraphs if p.text.strip()]
-                # 셀당 최대 20줄로 제한 (단일 셀이 페이지를 초과하는 것 방지)
-                lines = lines[:20]
+
+                # 셀 너비 추정 → 줄당 최대 문자 수 계산
+                cell_col_w = col_w[col_cursor] if col_cursor < len(col_w) else avg_col_w
+                cell_col_w *= cell.colspan
+                chars_per_line = max(1, int(cell_col_w / (cell_fs * 0.58)))
+
+                # 실제 줄바꿈을 고려한 총 라인 수 추정 후 잘라내기
+                wrapped_count = 0
+                trimmed_lines = []
+                for ln in lines:
+                    wrapped = max(1, (len(ln) + chars_per_line - 1) // chars_per_line)
+                    if wrapped_count + wrapped > max_lines_per_cell:
+                        # 남은 공간에 맞게 해당 줄 자르기
+                        remaining = max_lines_per_cell - wrapped_count
+                        if remaining > 0:
+                            max_chars = remaining * chars_per_line
+                            trimmed_lines.append(ln[:max_chars] + ('…' if len(ln) > max_chars else ''))
+                        break
+                    trimmed_lines.append(ln)
+                    wrapped_count += wrapped
+
                 cell_text = '<br/>'.join(
                     l.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-                    for l in lines
+                    for l in trimmed_lines
                 )
 
                 is_hdr = row.is_header or cell.is_header
@@ -616,8 +655,8 @@ class ETRIPdfGenerator:
                 p_style = ParagraphStyle(
                     f'TC{r_idx}_{col_cursor}',
                     fontName=fn,
-                    fontSize=S.FS_BODY - 0.5,
-                    leading=S.LEADING_BODY - 2,
+                    fontSize=cell_fs,
+                    leading=cell_ld,
                     textColor=tc,
                     alignment=TA_CENTER if is_hdr else TA_LEFT,
                 )
