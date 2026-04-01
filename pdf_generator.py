@@ -780,7 +780,8 @@ class ETRIPdfGenerator:
     _T_HBORDER   = colors.HexColor('#808080')   # 헤더 아래 선
 
     # 합계/소계 행으로 인식할 키워드
-    _TOTAL_KEYS  = {'합계', '계', '소계', '전체', 'total', 'subtotal', 'sum'}
+    _TOTAL_KEYS  = {'합계', '계', '소계', '전체', '총합계', '합  계', '소  계',
+                     '합 계', '소 계', 'total', 'subtotal', 'sum'}
 
     @staticmethod
     def _is_numeric_cell(text: str) -> bool:
@@ -880,13 +881,19 @@ class ETRIPdfGenerator:
             if r_idx < n_header_rows:
                 continue
 
-            # 합계 행 감지 (첫 셀 텍스트 기준)
+            # 합계 행 감지 (첫 셀 텍스트 기준 — 공백 정규화 후 exact/prefix 매칭)
             first_text = ''
             if row.cells:
                 first_text = ' '.join(
                     p.text.strip() for p in row.cells[0].paragraphs
-                ).strip().lower()
-            is_total = first_text in self._TOTAL_KEYS
+                ).strip()
+            _ft_norm = re.sub(r'\s+', '', first_text).lower()  # 공백 제거 후 소문자
+            is_total = (
+                _ft_norm in {re.sub(r'\s+', '', k) for k in self._TOTAL_KEYS}
+                or _ft_norm.startswith('합계')
+                or _ft_norm.startswith('총합계')
+                or _ft_norm.startswith('소계')
+            )
 
             if is_total:
                 row_bg = self._T_HDR_BG  # 합계 행 = 헤더와 동일 파란 배경
@@ -996,9 +1003,8 @@ class ETRIPdfGenerator:
                 if safe_rowspan > 1:
                     ts_cmds.append(('SPAN', (col_cursor, r_idx), (span_end_c, span_end_r)))
                     ts_cmds.append(('VALIGN', (col_cursor, r_idx), (span_end_c, span_end_r), 'MIDDLE'))
-                    # 병합 셀 배경 (첫 컬럼 병합 셀은 특별 색상)
-                    merge_bg = self._T_MERGE_BG if col_cursor == 0 else self._T_EVEN_BG
-                    ts_cmds.append(('BACKGROUND', (col_cursor, r_idx), (span_end_c, span_end_r), merge_bg))
+                    # 병합 셀 배경: row_bg(현재 행 교대색)와 통일 — 첫 컬럼도 동일 적용
+                    ts_cmds.append(('BACKGROUND', (col_cursor, r_idx), (span_end_c, span_end_r), row_bg))
 
                 # 셀별 배경 오버라이드 (DOCX 지정색) — 합계 행 제외
                 if cell.bg_color and not (is_hdr_row or cell.is_header) and r_idx not in total_row_idxs:
@@ -1044,7 +1050,7 @@ class ETRIPdfGenerator:
             return []
         buf = io.BytesIO(img.data)
         max_w = S.CONTENT_W
-        max_h = S.CONTENT_H * 0.4
+        max_h = S.CONTENT_H * 0.55
 
         if img.width_emu and img.height_emu:
             w_pt = img.width_emu  / EMU_PER_PT
@@ -1131,6 +1137,11 @@ class ETRIPdfGenerator:
         body_items  = []
         in_toc      = True
 
+        # 본문 시작 감지: PART / Heading1 이 처음 등장하기 전은 전문(前文) 구간
+        # 전문 구간의 표(colophon 등)와 "목 차" 단독 단락은 skip
+        _body_started = False   # True 가 되면 모든 항목 포함
+        _TOC_PARA_RE  = re.compile(r'^목\s*차$')
+
         for item in doc.items:
             if isinstance(item, DocPara):
                 if item.style in ('TOC1', 'TOC2', 'TOC3', 'TOC4', 'TOC5'):
@@ -1139,6 +1150,18 @@ class ETRIPdfGenerator:
                     continue
                 else:
                     in_toc = False
+
+                # 본문 시작 마커: PART 또는 Heading1
+                if item.style in ('PART', 'Heading1'):
+                    _body_started = True
+
+                # 전문 구간 "목 차" 단독 단락 skip
+                if not _body_started and _TOC_PARA_RE.match(item.text.strip()):
+                    continue
+
+            # 전문 구간 표(colophon) skip: 본문이 시작되기 전 나타나는 Table
+            if not _body_started and isinstance(item, DocTable):
+                continue
 
             body_items.append(item)
 
@@ -1149,7 +1172,9 @@ class ETRIPdfGenerator:
                 fl = self._build_toc_entry(ti)
                 if fl:
                     story.append(fl)
-            story.append(PageBreak())
+            # TOC 후 PageBreak 불필요: 첫 H1/PART가 자체적으로 PageBreak 처리
+            # (TOC가 페이지 끝에서 끝나면 PageBreak+PageBreak = 빈 페이지 발생)
+
 
         # PART 구분 페이지 처리: PART 항목 찾기
         part_groups = self._group_by_parts(body_items)
